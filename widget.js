@@ -176,7 +176,7 @@
     container.id        = "cb-container";
     container.className = pos;
 
-    var upgradeUrl = _config.upgradeUrl || "https://yourchatbot.com/billing";
+    var upgradeUrl = _config.upgradeUrl || "http://localhost:5173/billing";
 
     container.innerHTML = [
       '<div id="cb-window">',
