@@ -1,5 +1,5 @@
 /**
- * ChatBot Widget v1.0
+ * ChatBot Widget v1.1
  * ════════════════════════════════════════════════════════════════
  * Developer integration — paste 2 lines in any website:
  *
@@ -7,23 +7,31 @@
  *   <script>
  *     ChatBot.init({
  *       apiKey:     "cb_live_sk_your_key_here",
- *       theme:      "blue",          // blue | green | purple | dark
- *       position:   "bottom-right",  // bottom-right | bottom-left
+ *       theme:      "blue",           // blue | green | purple | dark
+ *       position:   "bottom-right",   // bottom-right | bottom-left
  *       welcomeMsg: "Hi! How can I help you?",
  *       brandName:  "Support",
  *       brandLogo:  "https://yoursite.com/logo.png"  // optional
  *     });
  *   </script>
+ *
+ * Changes from v1.0:
+ *   - API_BASE configurable (no more hardcoded localhost)
+ *   - 429 plan limit error handled with upgrade message
+ *   - 401 invalid key handled properly
+ *   - Safe property access (no optional chaining — works in all browsers)
+ *   - Session ID assigned before first send, not at init
+ *   - Rate limit exceeded shows upgrade CTA
  */
 
 (function (window, document) {
   "use strict";
 
-  // ── Constants ────────────────────────────────────────────────────────────
-  var API_BASE   = "http://127.0.0.1:5000";
-  var WIDGET_VER = "1.0.0";
+  // ── Config — CHANGE THIS before deploying ────────────────────────────────
+  var API_BASE   = "http://127.0.0.1:5000";   // ← apna backend URL daalo
+  var WIDGET_VER = "1.1.0";
 
-  // ── Theme presets ────────────────────────────────────────────────────────
+  // ── Theme presets ─────────────────────────────────────────────────────────
   var THEMES = {
     blue:   { primary: "#2563eb", gradient: "linear-gradient(135deg,#2563eb,#4f46e5)" },
     green:  { primary: "#059669", gradient: "linear-gradient(135deg,#059669,#0d9488)" },
@@ -31,21 +39,27 @@
     dark:   { primary: "#0f172a", gradient: "linear-gradient(135deg,#0f172a,#1e293b)" },
   };
 
-  // ── State ────────────────────────────────────────────────────────────────
+  // ── State ─────────────────────────────────────────────────────────────────
   var _config    = {};
   var _sessionId = null;
   var _messages  = [];
   var _isOpen    = false;
   var _isSending = false;
   var _elements  = {};
+  var _planExpired = false;   // set to true when 429 received
 
-  // ── Session ID ───────────────────────────────────────────────────────────
+  // ── Session ID ────────────────────────────────────────────────────────────
   function getOrCreateSessionId() {
-    var key = "cb_session_" + _config.apiKey.slice(-8);
-    var sid = localStorage.getItem(key);
+    // Use last 8 chars of API key as namespace — different keys = different sessions
+    var namespace = _config.apiKey ? _config.apiKey.slice(-8) : "default";
+    var key = "cb_session_" + namespace;
+    var sid = null;
+
+    try { sid = localStorage.getItem(key); } catch (e) {}
+
     if (!sid || !isValidUUID(sid)) {
       sid = generateUUID();
-      localStorage.setItem(key, sid);
+      try { localStorage.setItem(key, sid); } catch (e) {}
     }
     return sid;
   }
@@ -59,19 +73,19 @@
   }
 
   function isValidUUID(str) {
+    if (!str) return false;
     return /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(str);
   }
 
-  // ── Styles ───────────────────────────────────────────────────────────────
+  // ── Styles ────────────────────────────────────────────────────────────────
   function injectStyles(theme) {
     var t = THEMES[theme] || THEMES.blue;
     var css = [
-      "#cb-container*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}",
+      "#cb-container *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}",
       "#cb-container{position:fixed;z-index:2147483647}",
       "#cb-container.pos-br{bottom:24px;right:24px}",
       "#cb-container.pos-bl{bottom:24px;left:24px}",
 
-      /* Bubble button */
       "#cb-bubble{width:58px;height:58px;border-radius:50%;background:" + t.gradient + ";border:none;cursor:pointer;",
       "box-shadow:0 4px 20px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;",
       "transition:transform .2s ease;position:relative;outline:none}",
@@ -80,27 +94,24 @@
       "#cb-badge{position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;border-radius:50%;",
       "width:18px;height:18px;font-size:11px;font-weight:700;display:none;align-items:center;justify-content:center}",
 
-      /* Window */
       "#cb-window{position:absolute;bottom:70px;width:360px;height:520px;background:#fff;border-radius:16px;",
       "box-shadow:0 20px 60px rgba(0,0,0,.18);display:flex;flex-direction:column;overflow:hidden;",
       "transform:scale(.8) translateY(20px);opacity:0;pointer-events:none;",
       "transition:transform .25s cubic-bezier(.16,1,.3,1),opacity .25s ease}",
       "#cb-window.open{transform:scale(1) translateY(0);opacity:1;pointer-events:all}",
-      ".pos-br #cb-window{right:0} .pos-bl #cb-window{left:0}",
+      ".pos-br #cb-window{right:0}.pos-bl #cb-window{left:0}",
 
-      /* Header */
       "#cb-header{background:" + t.gradient + ";padding:14px 16px;display:flex;align-items:center;gap:10px}",
       "#cb-logo{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.2);",
       "display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0}",
       "#cb-logo img{width:100%;height:100%;object-fit:cover}",
       "#cb-logo svg{width:20px;height:20px;fill:#fff}",
-      "#cb-brand{flex:1} #cb-brand-name{font-size:14px;font-weight:700;color:#fff}",
+      "#cb-brand{flex:1}#cb-brand-name{font-size:14px;font-weight:700;color:#fff}",
       "#cb-brand-status{font-size:11px;color:rgba(255,255,255,.7);display:flex;align-items:center;gap:4px}",
       ".cb-status-dot{width:6px;height:6px;border-radius:50%;background:#4ade80}",
       "#cb-close{background:none;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:20px;padding:4px;line-height:1}",
       "#cb-close:hover{color:#fff}",
 
-      /* Messages */
       "#cb-messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;scroll-behavior:smooth}",
       "#cb-messages::-webkit-scrollbar{width:4px}",
       "#cb-messages::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:4px}",
@@ -112,25 +123,31 @@
       ".cb-msg-row.user{align-items:flex-end}",
       ".cb-msg-row.bot{align-items:flex-start}",
 
-      /* Typing dots */
-      ".cb-typing{display:flex;gap:4px;padding:10px 14px;background:#f1f5f9;border-radius:12px;border-bottom-left-radius:3px;align-self:flex-start}",
+      ".cb-typing{display:flex;gap:4px;padding:10px 14px;background:#f1f5f9;border-radius:12px;",
+      "border-bottom-left-radius:3px;align-self:flex-start}",
       ".cb-typing span{width:7px;height:7px;border-radius:50%;background:#94a3b8;animation:cb-blink 1.2s infinite}",
       ".cb-typing span:nth-child(2){animation-delay:.2s}",
       ".cb-typing span:nth-child(3){animation-delay:.4s}",
       "@keyframes cb-blink{0%,80%,100%{opacity:.2}40%{opacity:1}}",
 
-      /* Input */
+      /* Upgrade banner — shown when plan limit hit */
+      "#cb-upgrade{background:#fef3c7;border-top:1px solid #fde68a;padding:10px 14px;",
+      "font-size:12px;color:#92400e;display:none;align-items:center;gap:8px;justify-content:space-between}",
+      "#cb-upgrade a{color:#d97706;font-weight:600;text-decoration:none;white-space:nowrap}",
+      "#cb-upgrade a:hover{text-decoration:underline}",
+
       "#cb-input-area{border-top:1px solid #e2e8f0;padding:10px 12px;display:flex;gap:8px;align-items:flex-end;background:#fafafa}",
       "#cb-input{flex:1;border:1px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:13.5px;",
       "outline:none;resize:none;min-height:38px;max-height:100px;line-height:1.5;background:#fff;color:#0f172a}",
       "#cb-input:focus{border-color:" + t.primary + ";box-shadow:0 0 0 3px " + t.primary + "22}",
+      "#cb-input:disabled{background:#f8fafc;cursor:not-allowed;opacity:.7}",
       "#cb-send{width:36px;height:36px;border-radius:50%;background:" + t.gradient + ";border:none;cursor:pointer;",
       "display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .2s}",
       "#cb-send:disabled{opacity:.5;cursor:not-allowed}",
       "#cb-send svg{width:16px;height:16px;fill:none;stroke:#fff;stroke-width:2.5}",
 
-      /* Welcome */
-      "#cb-welcome{padding:20px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:8px;flex:1;justify-content:center}",
+      "#cb-welcome{padding:20px;text-align:center;display:flex;flex-direction:column;align-items:center;",
+      "gap:8px;flex:1;justify-content:center}",
       "#cb-welcome h3{font-size:16px;font-weight:700;color:#0f172a}",
       "#cb-welcome p{font-size:13px;color:#64748b;line-height:1.6;max-width:260px}",
       ".cb-start-btn{background:" + t.gradient + ";color:#fff;border:none;padding:10px 24px;border-radius:8px;",
@@ -141,10 +158,8 @@
       ".cb-suggestion:hover{background:#e2e8f0}",
       ".cb-suggestions{display:flex;flex-direction:column;gap:6px;width:100%;margin-top:4px}",
 
-      /* Powered by */
       "#cb-powered{text-align:center;padding:6px;font-size:10px;color:#cbd5e1;border-top:1px solid #f1f5f9}",
       "#cb-powered a{color:#94a3b8;text-decoration:none}",
-      "#cb-powered a:hover{color:#64748b}",
     ].join("");
 
     var style = document.createElement("style");
@@ -161,6 +176,8 @@
     container.id        = "cb-container";
     container.className = pos;
 
+    var upgradeUrl = _config.upgradeUrl || "https://yourchatbot.com/billing";
+
     container.innerHTML = [
       '<div id="cb-window">',
         '<div id="cb-header">',
@@ -171,16 +188,25 @@
           '</div>',
           '<button id="cb-close" aria-label="Close chat">&#x2715;</button>',
         '</div>',
+
+        // Plan limit banner (hidden by default)
+        '<div id="cb-upgrade">',
+          '<span>&#128274; Monthly query limit reached.</span>',
+          '<a href="' + upgradeUrl + '" target="_blank">Upgrade Plan &rarr;</a>',
+        '</div>',
+
         '<div id="cb-messages">',
           buildWelcomeScreen(),
         '</div>',
+
         '<div id="cb-input-area" style="display:none">',
           '<textarea id="cb-input" placeholder="Type your message…" rows="1"></textarea>',
           '<button id="cb-send" aria-label="Send">',
             '<svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
           '</button>',
         '</div>',
-        (_config.hidePoweredBy ? '' : '<div id="cb-powered">Powered by <a href="https://yourchatbot.com" target="_blank">ChatBot</a></div>'),
+
+        (_config.hidePoweredBy ? "" : '<div id="cb-powered">Powered by <a href="https://yourchatbot.com" target="_blank">ChatBot</a></div>'),
       '</div>',
 
       '<div id="cb-badge">0</div>',
@@ -191,16 +217,16 @@
 
     document.body.appendChild(container);
 
-    // Cache elements
     _elements = {
-      window:   container.querySelector("#cb-window"),
-      messages: container.querySelector("#cb-messages"),
-      input:    container.querySelector("#cb-input"),
-      send:     container.querySelector("#cb-send"),
-      inputArea:container.querySelector("#cb-input-area"),
-      bubble:   container.querySelector("#cb-bubble"),
-      badge:    container.querySelector("#cb-badge"),
-      close:    container.querySelector("#cb-close"),
+      window:    container.querySelector("#cb-window"),
+      messages:  container.querySelector("#cb-messages"),
+      input:     container.querySelector("#cb-input"),
+      send:      container.querySelector("#cb-send"),
+      inputArea: container.querySelector("#cb-input-area"),
+      bubble:    container.querySelector("#cb-bubble"),
+      badge:     container.querySelector("#cb-badge"),
+      close:     container.querySelector("#cb-close"),
+      upgrade:   container.querySelector("#cb-upgrade"),
     };
   }
 
@@ -224,7 +250,7 @@
 
     return [
       '<div id="cb-welcome">',
-        '<h3>👋 ' + esc(_config.welcomeMsg || "Hi! How can I help you?") + '</h3>',
+        '<h3>&#128075; ' + esc(_config.welcomeMsg || "Hi! How can I help you?") + '</h3>',
         '<p>Ask me anything about our services, products, or how to get started.</p>',
         '<button class="cb-start-btn" id="cb-start">Start chatting</button>',
         '<div class="cb-suggestions">' + suggHtml + '</div>',
@@ -234,35 +260,30 @@
 
   // ── Events ────────────────────────────────────────────────────────────────
   function bindEvents() {
-    // Toggle bubble
     _elements.bubble.addEventListener("click", function () {
       toggle();
       resetBadge();
     });
 
-    // Close
     _elements.close.addEventListener("click", function () {
       close();
     });
 
-    // Start button
     _elements.messages.addEventListener("click", function (e) {
-      var btn = e.target.closest("#cb-start");
-      if (btn) startChat();
+      var btn = e.target.closest ? e.target.closest("#cb-start") : null;
+      if (btn) { startChat(); return; }
 
-      var sug = e.target.closest(".cb-suggestion");
+      var sug = e.target.closest ? e.target.closest(".cb-suggestion") : null;
       if (sug) {
         startChat();
-        sendMessage(sug.dataset.text);
+        sendMessage(sug.getAttribute("data-text"));
       }
     });
 
-    // Send button
     _elements.send.addEventListener("click", function () {
       sendFromInput();
     });
 
-    // Enter key
     _elements.input.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -270,7 +291,6 @@
       }
     });
 
-    // Auto-resize textarea
     _elements.input.addEventListener("input", function () {
       this.style.height = "auto";
       this.style.height = Math.min(this.scrollHeight, 100) + "px";
@@ -279,7 +299,7 @@
 
   // ── Chat logic ────────────────────────────────────────────────────────────
   function startChat() {
-    var welcome = _elements.messages.querySelector("#cb-welcome");
+    var welcome = document.getElementById("cb-welcome");
     if (welcome) welcome.remove();
     _elements.inputArea.style.display = "flex";
 
@@ -291,19 +311,24 @@
 
   function sendFromInput() {
     var text = _elements.input.value.trim();
-    if (!text || _isSending) return;
+    if (!text || _isSending || _planExpired) return;
     _elements.input.value = "";
     _elements.input.style.height = "auto";
     sendMessage(text);
   }
 
   function sendMessage(text) {
-    if (!text.trim() || _isSending) return;
+    if (!text || !text.trim() || _isSending || _planExpired) return;
     startChat();
     addUserMessage(text);
     showTyping();
     _isSending = true;
     _elements.send.disabled = true;
+
+    // Ensure session ID exists before sending
+    if (!_sessionId) {
+      _sessionId = getOrCreateSessionId();
+    }
 
     fetch(API_BASE + "/qdrantapi/search", {
       method:  "POST",
@@ -314,12 +339,48 @@
       body: JSON.stringify({
         query:      text,
         session_id: _sessionId,
+        // NOTE: collection NOT sent — backend assigns from API key
       }),
     })
-    .then(function (res) { return res.json(); })
-    .then(function (data) {
+    .then(function (res) {
+      // Capture status before parsing JSON
+      var status = res.status;
+      return res.json().then(function (data) {
+        return { status: status, data: data };
+      });
+    })
+    .then(function (payload) {
       hideTyping();
-      var answer = data?.result?.human_like_answer;
+      var status = payload.status;
+      var data   = payload.data;
+
+      // ── 429: Plan limit exceeded ────────────────────────────────────
+      if (status === 429) {
+        _planExpired = true;
+        showUpgradeBanner();
+        addBotMessage("You have reached your monthly query limit. Please upgrade your plan to continue.");
+        disableInput();
+        return;
+      }
+
+      // ── 401: Invalid API key ───────────────────────────────────────
+      if (status === 401) {
+        addBotMessage("Configuration error. Please contact the website administrator.");
+        console.error("[ChatBot] Invalid API key. Check ChatBot.init({ apiKey: ... })");
+        return;
+      }
+
+      // ── 500 / other errors ─────────────────────────────────────────
+      if (status >= 500) {
+        addBotMessage("Our service is temporarily unavailable. Please try again later.");
+        return;
+      }
+
+      // ── Normal response ────────────────────────────────────────────
+      // Safe access without optional chaining (works in all browsers)
+      var answer = data && data.result && data.result.human_like_answer
+        ? data.result.human_like_answer
+        : null;
 
       if (!answer || answer === "0") {
         addBotMessage("I don't have information on that. Please contact our support team.");
@@ -327,16 +388,39 @@
         addBotMessage(answer);
       }
 
+      // Show badge if window is closed
       if (!_isOpen) incrementBadge();
+
+      // Log usage if returned (optional)
+      if (data && data.usage) {
+        console.log("[ChatBot] Usage: " + data.usage.used + "/" + data.usage.limit + " (" + data.usage.plan + ")");
+      }
     })
     .catch(function () {
       hideTyping();
-      addBotMessage("Something went wrong. Please try again.");
+      addBotMessage("Connection failed. Please check your internet and try again.");
     })
     .finally(function () {
       _isSending = false;
-      _elements.send.disabled = false;
+      _elements.send.disabled = _planExpired;  // keep disabled if plan expired
     });
+  }
+
+  // ── Upgrade banner ────────────────────────────────────────────────────────
+  function showUpgradeBanner() {
+    if (_elements.upgrade) {
+      _elements.upgrade.style.display = "flex";
+    }
+  }
+
+  function disableInput() {
+    if (_elements.input) {
+      _elements.input.disabled    = true;
+      _elements.input.placeholder = "Query limit reached. Upgrade to continue.";
+    }
+    if (_elements.send) {
+      _elements.send.disabled = true;
+    }
   }
 
   // ── Message renderers ─────────────────────────────────────────────────────
@@ -356,15 +440,14 @@
     var time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     var row  = document.createElement("div");
     row.className = "cb-msg-row " + role;
-    row.innerHTML = [
-      '<div class="cb-msg cb-msg-' + role + '">' + linkify(esc(text)) + '</div>',
-      '<div class="cb-msg-time">' + (role === "bot" ? "Bot" : "You") + " · " + time + "</div>",
-    ].join("");
+    row.innerHTML =
+      '<div class="cb-msg cb-msg-' + role + '">' + linkify(esc(text)) + "</div>" +
+      '<div class="cb-msg-time">' + (role === "bot" ? "Bot" : "You") + " &middot; " + time + "</div>";
     _elements.messages.appendChild(row);
   }
 
   function showTyping() {
-    var el  = document.createElement("div");
+    var el   = document.createElement("div");
     el.className = "cb-typing";
     el.id        = "cb-typing";
     el.innerHTML = "<span></span><span></span><span></span>";
@@ -374,7 +457,7 @@
 
   function hideTyping() {
     var el = document.getElementById("cb-typing");
-    if (el) el.remove();
+    if (el) el.parentNode.removeChild(el);
   }
 
   function scrollToBottom() {
@@ -385,8 +468,8 @@
   var _badgeCount = 0;
   function incrementBadge() {
     _badgeCount++;
-    _elements.badge.textContent = _badgeCount;
-    _elements.badge.style.display = "flex";
+    _elements.badge.textContent     = _badgeCount;
+    _elements.badge.style.display   = "flex";
   }
   function resetBadge() {
     _badgeCount = 0;
@@ -398,18 +481,19 @@
 
   function open() {
     _isOpen = true;
-    _elements.window.classList.add("open");
-    setTimeout(function () { _elements.input.focus(); }, 300);
+    _elements.window.className = _elements.window.className + " open";
+    var _this = _elements.input;
+    setTimeout(function () { if (_this && !_planExpired) _this.focus(); }, 300);
   }
 
   function close() {
     _isOpen = false;
-    _elements.window.classList.remove("open");
+    _elements.window.className = _elements.window.className.replace(/\s*open\s*/g, " ").trim();
   }
 
   // ── Utils ─────────────────────────────────────────────────────────────────
   function esc(str) {
-    return String(str)
+    return String(str || "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
@@ -427,19 +511,20 @@
   window.ChatBot = {
     /**
      * Initialize the chatbot widget.
-     * @param {Object} config
-     * @param {string} config.apiKey      - Required. Your cb_live_sk_xxx key
-     * @param {string} [config.theme]     - blue | green | purple | dark
-     * @param {string} [config.position]  - bottom-right | bottom-left
-     * @param {string} [config.welcomeMsg]- Welcome message text
-     * @param {string} [config.brandName] - Your company name
-     * @param {string} [config.brandLogo] - URL to your logo image
-     * @param {Array}  [config.suggestions] - Quick reply suggestions
-     * @param {boolean}[config.hidePoweredBy] - Hide "Powered by" footer
+     * @param {Object}  config
+     * @param {string}  config.apiKey        - Required. cb_live_sk_xxx key
+     * @param {string}  [config.theme]       - blue | green | purple | dark
+     * @param {string}  [config.position]    - bottom-right | bottom-left
+     * @param {string}  [config.welcomeMsg]  - Welcome message
+     * @param {string}  [config.brandName]   - Your company name
+     * @param {string}  [config.brandLogo]   - Logo URL
+     * @param {Array}   [config.suggestions] - Quick reply buttons (max 3)
+     * @param {boolean} [config.hidePoweredBy] - Hide "Powered by" footer
+     * @param {string}  [config.upgradeUrl]  - URL for plan upgrade (shown on 429)
      */
     init: function (config) {
       if (!config || !config.apiKey) {
-        console.error("[ChatBot] apiKey is required in ChatBot.init({ apiKey: 'cb_live_sk_...' })");
+        console.error("[ChatBot] apiKey is required. Usage: ChatBot.init({ apiKey: 'cb_live_sk_...' })");
         return;
       }
 
@@ -450,7 +535,7 @@
       buildDOM();
       bindEvents();
 
-      console.log("[ChatBot] Widget v" + WIDGET_VER + " initialized | session: " + _sessionId);
+      console.log("[ChatBot] v" + WIDGET_VER + " ready | session: " + _sessionId);
     },
 
     open:    function () { open(); },
@@ -459,9 +544,9 @@
     send:    function (text) { sendMessage(text); },
     destroy: function () {
       var el = document.getElementById("cb-container");
-      if (el) el.remove();
+      if (el) el.parentNode.removeChild(el);
       var st = document.getElementById("cb-styles");
-      if (st) st.remove();
+      if (st) st.parentNode.removeChild(st);
     },
   };
 
