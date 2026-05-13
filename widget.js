@@ -56,7 +56,6 @@
   var _planExpired  = false;
   var _rzKey        = "";
   var _plans        = {};
-  var _userId       = null;    // fetched from backend — NEVER hardcoded in JS
   var _selectedPlan = null;
 
   // ── Session ───────────────────────────────────────────────────────────
@@ -467,25 +466,21 @@
       return;
     }
 
-    if (!_userId) {
-      addBot("Could not identify your account. Please contact support.");
-      closeModal();
-      return;
-    }
-
     _elements.pbtn.textContent = "Creating order\u2026";
     _elements.pbtn.disabled = true;
 
     fetch(API_BASE + "/payment/create-subscription", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ plan: _selectedPlan}),
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + _config.apiKey,  // ← ADD KARO
+      },
+      body: JSON.stringify({ plan: _selectedPlan }),
     })
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (!d.success) {
-        if (d.dev_hint) { devUpgradeFallback(); return; }
-        addBot("Could not start payment. Please try again.");
+         addBot("Could not start payment. Please try again.");
         _elements.pbtn.textContent = "Pay \u20B9" + ((_plans[_selectedPlan] || {}).price || 0).toLocaleString() + " / month";
         _elements.pbtn.disabled = false;
         return;
@@ -501,7 +496,10 @@
   function openRazorpay(order) {
     closeModal();
     var key = order.razorpay_key || _rzKey;
-    if (!key) { devUpgradeFallback(); return; }
+    if (!key) {
+      addBot("Payment service not configured. Please contact the website owner.");
+      return;
+    }
 
     function launch() {
       new window.Razorpay({
@@ -535,26 +533,6 @@
     } else {
       launch();
     }
-  }
-
-  function devUpgradeFallback() {
-    if (!_userId) { closeModal(); return; }
-    fetch(API_BASE + "/payment/dev-upgrade", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({plan: _selectedPlan }),
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.success) {
-        _planExpired = false;
-        if (_elements.ubtn) _elements.ubtn.style.display = "none";
-        enableInput();
-        addBot("\u2705 Plan upgraded! (Dev mode)");
-      }
-      closeModal();
-    })
-    .catch(function() { closeModal(); });
   }
 
   // ── Input enable/disable ──────────────────────────────────────────────
@@ -729,12 +707,11 @@
   function toggle()    { _isOpen ? closeChat() : openChat(); }
   function openChat()  {
     _isOpen = true;
-    _elements.win.className = _elements.win.className + " open";
+    _elements.win.classList.add("open");
     if (!_planExpired) setTimeout(function() { if(_elements.inp) _elements.inp.focus(); }, 300);
   }
   function closeChat() {
     _isOpen = false;
-    _elements.win.classList.add("open");
     _elements.win.classList.remove("open");
     closeModal();
   }
